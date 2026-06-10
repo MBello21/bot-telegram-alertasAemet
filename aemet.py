@@ -647,7 +647,14 @@ class AemetClient:
             if contenido_cap:
                 import tarfile as _tar
                 from xml.etree import ElementTree as _ET
-                prefijo = CAP_ZONA_PREFIJO if CAP_ZONA_PREFIJO else provincia_codigo
+                zona_objetivo = os.environ.get("CAP_ZONA_ESPECIFICA", "")
+                if zona_objetivo:
+                    if zona != zona_objetivo:
+                        continue
+                else:
+                    prefijo = CAP_ZONA_PREFIJO if CAP_ZONA_PREFIJO else provincia_codigo
+                    if len(zona) < 4 or zona[2:4] != prefijo:
+                        continue
                 tar = _tar.open(fileobj=io.BytesIO(contenido_cap))
                 vistos = set()
                 for member in tar.getmembers():
