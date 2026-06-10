@@ -81,6 +81,27 @@ LEYENDA = (
 
 CAP_NS = "urn:oasis:names:tc:emergency:cap:1.2"
 
+# Mapeo nivel AEMET oficial → categoria minima a mostrar en tabla
+NIVEL_CAP_A_CAT = {
+    "amarillo": 3,
+    "naranja":  4,
+    "rojo":     5,
+    "verde":    1,
+}
+
+# Mapeo fenomeno de alerta CAP → columnas afectadas
+def _fenomeno_a_columnas(parametro: str) -> set:
+    """Devuelve qué columnas de la tabla deben respetar el nivel CAP."""
+    p = parametro.lower()
+    if any(x in p for x in ["temperatura", "calor", "frio"]):
+        return {"temp"}
+    if any(x in p for x in ["viento", "racha", "costero", "oleaje"]):
+        return {"viento"}
+    if any(x in p for x in ["lluvia", "precipit", "nieve", "granizo"]):
+        return {"precip"}
+    # Si no se reconoce aplicar a todas
+    return {"temp", "viento", "precip"}
+
 
 def _float(v) -> float | None:
     try:
@@ -106,36 +127,45 @@ class AemetClient:
         self.api_key = api_key
         self.headers = {"api_key": api_key}
 
-    async def _get_json(self, url: str) -> dict | list | None:
-        async with httpx.AsyncClient(timeout=20) as c:
-            try:
-                r = await c.get(url, headers=self.headers)
-                r.raise_for_status()
-                return r.json()
-            except httpx.HTTPError as e:
-                logger.error(f"HTTP error: {e}")
-                return None
+    async def _get_json(self, url: str, reintentos: int = 2) -> dict | list | None:
+        for intento in range(reintentos):
+            async with httpx.AsyncClient(timeout=20) as c:
+                try:
+                    r = await c.get(url, headers=self.headers)
+                    r.raise_for_status()
+                    return r.json()
+                except httpx.HTTPError as e:
+                    logger.warning(f"HTTP error intento {intento+1}: {e}")
+                    if intento < reintentos - 1:
+                        await asyncio.sleep(2)
+        return None
 
-    async def _get_datos(self, datos_url: str) -> list | None:
-        async with httpx.AsyncClient(timeout=20) as c:
-            try:
-                r = await c.get(datos_url, headers=self.headers)
-                r.raise_for_status()
-                content = r.content.decode("latin-1")
-                return json.loads(content)
-            except httpx.HTTPError as e:
-                logger.error(f"HTTP error (datos): {e}")
-                return None
+    async def _get_datos(self, datos_url: str, reintentos: int = 2) -> list | None:
+        for intento in range(reintentos):
+            async with httpx.AsyncClient(timeout=20) as c:
+                try:
+                    r = await c.get(datos_url, headers=self.headers)
+                    r.raise_for_status()
+                    content = r.content.decode("latin-1")
+                    return json.loads(content)
+                except httpx.HTTPError as e:
+                    logger.warning(f"HTTP error (datos) intento {intento+1}: {e}")
+                    if intento < reintentos - 1:
+                        await asyncio.sleep(2)
+        return None
 
-    async def _get_bytes(self, url: str) -> bytes | None:
-        async with httpx.AsyncClient(timeout=30) as c:
-            try:
-                r = await c.get(url, headers=self.headers)
-                r.raise_for_status()
-                return r.content
-            except httpx.HTTPError as e:
-                logger.error(f"HTTP error (bytes): {e}")
-                return None
+    async def _get_bytes(self, url: str, reintentos: int = 2) -> bytes | None:
+        for intento in range(reintentos):
+            async with httpx.AsyncClient(timeout=30) as c:
+                try:
+                    r = await c.get(url, headers=self.headers)
+                    r.raise_for_status()
+                    return r.content
+                except httpx.HTTPError as e:
+                    logger.warning(f"HTTP error (bytes) intento {intento+1}: {e}")
+                    if intento < reintentos - 1:
+                        await asyncio.sleep(2)
+        return None
 
     async def _obtener_dias_horarios(self, codmun: str) -> list | None:
         url = f"{BASE_URL}/prediccion/especifica/municipio/horaria/{codmun}"
@@ -281,10 +311,14 @@ class AemetClient:
                         zona = geocode.findtext(_cap("value")) or ""
                         break
 
-                # Usar CAP_ZONA_PREFIJO si esta definido, si no usar provincia_codigo
-                prefijo = CAP_ZONA_PREFIJO if CAP_ZONA_PREFIJO else provincia_codigo
-                if len(zona) < 4 or zona[2:4] != prefijo:
-                    continue
+                # Filtro de zona — especifica o por prefijo
+                if CAP_ZONA_ESPECIFICA:
+                    if zona != CAP_ZONA_ESPECIFICA:
+                        continue
+                else:
+                    prefijo = CAP_ZONA_PREFIJO if CAP_ZONA_PREFIJO else provincia_codigo
+                    if len(zona) < 4 or zona[2:4] != prefijo:
+                        continue
 
                 onset = info.findtext(_cap("onset")) or ""
                 if not onset.startswith(hoy):
@@ -316,12 +350,13 @@ class AemetClient:
                     parametro = info.findtext(_cap("event"), default="")
 
                 alertas.append({
-                    "zona":       info.findtext(_cap("areaDesc"), default=zona),
-                    "nivelAviso": nivel,
-                    "parametro":  parametro,
-                    "inicio":     onset[11:16],
-                    "fin":        (info.findtext(_cap("expires")) or "")[11:16],
-                    "interna":    False,
+                    "zona":        NOMBRE_ZONA if NOMBRE_ZONA else info.findtext(_cap("areaDesc"), default=zona),
+                    "nivelAviso":  nivel,
+                    "parametro":   parametro,
+                    "descripcion": info.findtext(_cap("description"), default=""),
+                    "inicio":      onset[11:16],
+                    "fin":         (info.findtext(_cap("expires")) or "")[11:16],
+                    "interna":     False,
                 })
 
         return alertas
@@ -363,15 +398,8 @@ class AemetClient:
             else:
                 en   = NIVEL_EMOJI.get(nivel.lower(), "⚠️")
                 tipo = "Alerta AEMET"
-                fenomeno_lower = fenomeno.lower()
-                if "temperatura" in fenomeno_lower and maximos.get("temp_max") is not None:
-                    desc = f"Temperatura maxima: {maximos['temp_max']:.0f}C"
-                elif "viento" in fenomeno_lower and maximos.get("viento_max") is not None:
-                    desc = f"Viento maximo: {maximos['viento_max']:.0f} km/h"
-                elif ("lluvia" in fenomeno_lower or "precipit" in fenomeno_lower) and maximos.get("precip_max") is not None:
-                    desc = f"Precipitacion maxima: {maximos['precip_max']:.1f} mm/h"
-                else:
-                    desc = a.get("descripcion", "")
+                # Usar descripcion del XML directamente
+                desc = a.get("descripcion", "")
 
             lineas.append(
                 f"{en} *{tipo} — {zona}*\n"
@@ -385,10 +413,16 @@ class AemetClient:
     def _tabla_prediccion(
         self, filas: list[DatoHora], nombre_prov: str,
         hay_cap: bool = False, hay_interna: bool = False,
-        horas_cap: set = None
+        horas_cap: set = None, nivel_cap: str = "", alertas_cap: list = None
     ) -> str:
         if horas_cap is None:
             horas_cap = set()
+
+        cat_min_cap = NIVEL_CAP_A_CAT.get(nivel_cap.lower(), 0) if nivel_cap else 0
+        cols_afectadas: set = set()
+        if alertas_cap and cat_min_cap > 0:
+            for a in alertas_cap:
+                cols_afectadas |= _fenomeno_a_columnas(a.get("parametro", ""))
 
         cab_tabla = "|  Hr  | Of. |  TºC   |  P mm/h   |  V Km/h  |"
         sep       = "-" * 46
@@ -398,6 +432,12 @@ class AemetClient:
             cat_t = _cat_temperatura(f.temp)
             cat_v = _cat_viento(f.viento)
             cat_p = _cat_precipitacion(f.precip)
+
+            # Si la hora tiene alerta oficial aplicar categoria minima solo en columnas afectadas
+            if f.hora in horas_cap and cat_min_cap > 0:
+                if "temp"   in cols_afectadas and f.temp   is not None: cat_t = max(cat_t, cat_min_cap)
+                if "viento" in cols_afectadas and f.viento is not None: cat_v = max(cat_v, cat_min_cap)
+                if "precip" in cols_afectadas and f.precip is not None: cat_p = max(cat_p, cat_min_cap)
 
             ic_t = COLORES[cat_t] if cat_t > 0 else "  "
             ic_v = COLORES[cat_v] if cat_v > 0 else "  "
@@ -433,14 +473,14 @@ class AemetClient:
     async def obtener_tabla_y_maximos(
         self, codmun: str, nombre_prov: str = "Cadiz",
         hay_cap: bool = False, hay_interna: bool = False,
-        horas_cap: set = None
+        horas_cap: set = None, nivel_cap: str = "", alertas_cap: list = None
     ) -> tuple[str, dict, list[DatoHora]]:
         dias = await self._obtener_dias_horarios(codmun)
         if not dias:
             return "No se pudo obtener la prediccion horaria.", {}, []
         _, filas = self._parsear_dia_hoy(dias)
         maximos  = self._maximos_de_filas(filas)
-        tabla    = self._tabla_prediccion(filas, nombre_prov, hay_cap, hay_interna, horas_cap or set())
+        tabla    = self._tabla_prediccion(filas, nombre_prov, hay_cap, hay_interna, horas_cap or set(), nivel_cap, alertas_cap or [])
         return tabla, maximos, filas
 
     async def obtener_datos_municipio(self, codmun: str) -> dict:
@@ -507,9 +547,11 @@ class AemetClient:
         if not alertas:
             return False, "", b""
 
-        # Calcular horas con alerta CAP activa
+        # Calcular horas con alerta CAP activa y nivel maximo
         horas_cap = set()
+        nivel_cap = ""
         if hay_cap:
+            orden_niveles = ["verde", "amarillo", "naranja", "rojo"]
             for a in alertas_cap:
                 inicio_str = a.get("inicio", "")
                 fin_str    = a.get("fin", "")
@@ -521,9 +563,19 @@ class AemetClient:
                             horas_cap.add(h)
                     except ValueError:
                         pass
+                # Nivel maximo entre todas las alertas CAP
+                niv = a.get("nivelAviso", "").lower()
+                if niv in orden_niveles:
+                    if not nivel_cap or orden_niveles.index(niv) > orden_niveles.index(nivel_cap):
+                        nivel_cap = niv
+
+        # Regenerar tabla con nivel_cap correcto
+        tabla, _, _ = await self.obtener_tabla_y_maximos(
+            codmun, nombre_prov, hay_cap, hay_interna, horas_cap, nivel_cap, alertas_cap if hay_cap else []
+        )
 
         texto_alertas = self._fmt_alertas(alertas, maximos)
-        imagen = self._generar_imagen(filas, hay_cap, horas_cap)
+        imagen = self._generar_imagen(filas, hay_cap, horas_cap, nivel_cap, alertas_cap if hay_cap else [])
         return True, texto_alertas, imagen
 
     async def obtener_imagen_tiempo(self, codmun: str, nombre_prov: str = "Cadiz") -> bytes:
@@ -532,11 +584,12 @@ class AemetClient:
         if not filas:
             return b""
 
-        hay_cap, alertas_cap = await self.obtener_alertas_cap(
-            next((k for k, v in PROVINCIAS.items() if v == nombre_prov), "11")
-        )
+        provincia_codigo = next((k for k, v in PROVINCIAS.items() if v == nombre_prov), "11")
+        hay_cap, alertas_cap = await self.obtener_alertas_cap(provincia_codigo)
 
-        horas_cap = set()
+        horas_cap  = set()
+        nivel_cap  = ""
+        orden_niveles = ["verde", "amarillo", "naranja", "rojo"]
         if hay_cap:
             for a in alertas_cap:
                 try:
@@ -546,23 +599,38 @@ class AemetClient:
                         horas_cap.add(h)
                 except (ValueError, TypeError):
                     pass
+                niv = a.get("nivelAviso", "").lower()
+                if niv in orden_niveles:
+                    if not nivel_cap or orden_niveles.index(niv) > orden_niveles.index(nivel_cap):
+                        nivel_cap = niv
 
-        return self._generar_imagen(filas, hay_cap, horas_cap)
+        return self._generar_imagen(filas, hay_cap, horas_cap, nivel_cap, alertas_cap if hay_cap else [])
 
-    def _generar_imagen(self, filas: list[DatoHora], hay_cap: bool, horas_cap: set) -> bytes:
+    def _generar_imagen(self, filas: list[DatoHora], hay_cap: bool, horas_cap: set, nivel_cap: str = "", alertas_cap: list = None) -> bytes:
         """Construye las filas_datos y llama al generador de imagen."""
         try:
             from generar_tabla_imagen import generar_imagen_tabla
 
-            filas_datos = [{
-                "hora":       f.hora,
-                "temp":       f.temp,
-                "precip":     f.precip,
-                "viento":     f.viento,
-                "temp_cat":   _cat_temperatura(f.temp),
-                "precip_cat": _cat_precipitacion(f.precip),
-                "viento_cat": _cat_viento(f.viento),
-            } for f in filas]
+            cat_min_cap = NIVEL_CAP_A_CAT.get(nivel_cap.lower(), 0) if nivel_cap else 0
+
+            # Calcular qué columnas afecta la alerta CAP
+            cols_afectadas: set = set()
+            if alertas_cap and cat_min_cap > 0:
+                for a in alertas_cap:
+                    cols_afectadas |= _fenomeno_a_columnas(a.get("parametro", ""))
+
+            filas_datos = []
+            for f in filas:
+                en_horas_cap = f.hora in horas_cap and cat_min_cap > 0
+                filas_datos.append({
+                    "hora":       f.hora,
+                    "temp":       f.temp,
+                    "precip":     f.precip,
+                    "viento":     f.viento,
+                    "temp_cat":   max(_cat_temperatura(f.temp),    cat_min_cap if en_horas_cap and "temp"   in cols_afectadas and f.temp   is not None else 0),
+                    "precip_cat": max(_cat_precipitacion(f.precip), cat_min_cap if en_horas_cap and "precip" in cols_afectadas and f.precip is not None else 0),
+                    "viento_cat": max(_cat_viento(f.viento),       cat_min_cap if en_horas_cap and "viento" in cols_afectadas and f.viento is not None else 0),
+                })
 
             logo_path = os.path.join(os.path.dirname(__file__), "logo.png")
             return generar_imagen_tabla(
@@ -618,19 +686,24 @@ class AemetClient:
             precips = {p["periodo"]: p.get("value") for p in dia.get("probPrecipitacion", [])
                        if p.get("periodo") in ["00-12", "12-24"]}
 
+            # Nivel CAP maximo para este dia (se calcula mas abajo con alertas_img)
+            nivel_cap_dia = ""
+
             periodos = []
             for periodo in ["00-12", "12-24"]:
                 v   = vientos.get(periodo)
                 p   = precips.get(periodo)
+                # Nivel minimo por alerta CAP activa en este dia
+                cat_min = NIVEL_CAP_A_CAT.get(nivel_cap_dia.lower(), 0) if nivel_cap_dia else 0
                 periodos.append({
                     "periodo":     periodo,
                     "temp_max":    temp_max,
                     "temp_min":    temp_min,
                     "viento":      v,
                     "precip_prob": p,
-                    "cat_temp":    _cat_temperatura(temp_max),
-                    "cat_viento":  _cat_viento(v),
-                    "cat_precip":  _cat_precip_prob(p),
+                    "cat_temp":    max(_cat_temperatura(temp_max), cat_min) if temp_max is not None else 0,
+                    "cat_viento":  max(_cat_viento(v),             cat_min) if v        is not None else 0,
+                    "cat_precip":  max(_cat_precip_prob(p),        cat_min) if p        is not None else 0,
                 })
 
             dias_datos.append({"fecha": fecha, "periodos": periodos})
@@ -713,9 +786,43 @@ class AemetClient:
                             "descripcion": info.findtext(_cap("description"), default=""),
                             "inicio":      onset[11:16],
                             "fin":         expires[11:16],
+                            "fecha_onset": onset[:10],
                         })
         except Exception as e:
             logger.error(f"Error obteniendo alertas para prediccion: {e}")
+
+        # Reinyectar nivel_cap_dia en cada dia de dias_datos
+        orden_niveles = ["verde", "amarillo", "naranja", "rojo"]
+        nivel_por_fecha: dict[str, str] = {}
+        cols_por_fecha: dict[str, set] = {}
+        for a in alertas_img:
+            f_onset = a.get("fecha_onset", "")
+            niv     = a.get("nivelAviso", "").lower()
+            cols    = _fenomeno_a_columnas(a.get("parametro", ""))
+            if f_onset:
+                # Acumular columnas afectadas por fecha
+                if f_onset not in cols_por_fecha:
+                    cols_por_fecha[f_onset] = set()
+                cols_por_fecha[f_onset] |= cols
+                # Nivel maximo por fecha
+                if niv in orden_niveles:
+                    actual = nivel_por_fecha.get(f_onset, "")
+                    if not actual or orden_niveles.index(niv) > orden_niveles.index(actual):
+                        nivel_por_fecha[f_onset] = niv
+
+        cat_min_por_fecha = {f: NIVEL_CAP_A_CAT.get(n, 0) for f, n in nivel_por_fecha.items()}
+
+        for dia in dias_datos:
+            cat_min = cat_min_por_fecha.get(dia["fecha"], 0)
+            cols    = cols_por_fecha.get(dia["fecha"], set())
+            if cat_min > 0:
+                for per in dia["periodos"]:
+                    if "temp"   in cols and per["temp_max"]    is not None:
+                        per["cat_temp"]   = max(per["cat_temp"],   cat_min)
+                    if "viento" in cols and per["viento"]      is not None:
+                        per["cat_viento"] = max(per["cat_viento"], cat_min)
+                    if "precip" in cols and per["precip_prob"] is not None:
+                        per["cat_precip"] = max(per["cat_precip"], cat_min)
 
         return dias_datos, alertas_img
 
