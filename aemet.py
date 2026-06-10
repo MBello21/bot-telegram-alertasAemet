@@ -24,9 +24,11 @@ from categorias import (
 
 logger = logging.getLogger(__name__)
 
-BASE_URL         = "https://opendata.aemet.es/opendata/api"
-CAP_AREA         = os.environ.get("CAP_AREA", "61")
-CAP_ZONA_PREFIJO = os.environ.get("CAP_ZONA_PREFIJO", "")
+BASE_URL             = "https://opendata.aemet.es/opendata/api"
+CAP_AREA             = os.environ.get("CAP_AREA", "61")
+CAP_ZONA_PREFIJO     = os.environ.get("CAP_ZONA_PREFIJO", "")
+CAP_ZONA_ESPECIFICA  = os.environ.get("CAP_ZONA_ESPECIFICA", "")
+NOMBRE_ZONA          = os.environ.get("NOMBRE_ZONA", "")
 
 PROVINCIAS = {
     "01": "Alava",         "02": "Albacete",      "03": "Alicante",
@@ -647,14 +649,7 @@ class AemetClient:
             if contenido_cap:
                 import tarfile as _tar
                 from xml.etree import ElementTree as _ET
-                zona_objetivo = os.environ.get("CAP_ZONA_ESPECIFICA", "")
-                if zona_objetivo:
-                    if zona != zona_objetivo:
-                        continue
-                else:
-                    prefijo = CAP_ZONA_PREFIJO if CAP_ZONA_PREFIJO else provincia_codigo
-                    if len(zona) < 4 or zona[2:4] != prefijo:
-                        continue
+                prefijo = CAP_ZONA_PREFIJO if CAP_ZONA_PREFIJO else provincia_codigo
                 tar = _tar.open(fileobj=io.BytesIO(contenido_cap))
                 vistos = set()
                 for member in tar.getmembers():
@@ -674,8 +669,13 @@ class AemetClient:
                             if "zona" in vname.lower():
                                 zona = geocode.findtext(_cap("value")) or ""
                                 break
-                        if len(zona) < 4 or zona[2:4] != prefijo:
-                            continue
+                        if CAP_ZONA_ESPECIFICA:
+                            if zona != CAP_ZONA_ESPECIFICA:
+                                continue
+                        else:
+                            prefijo = CAP_ZONA_PREFIJO if CAP_ZONA_PREFIJO else provincia_codigo
+                            if len(zona) < 4 or zona[2:4] != prefijo:
+                                continue
                         expires = info.findtext(_cap("expires")) or ""
                         if not expires or expires[:10] < hoy:
                             continue
@@ -707,7 +707,7 @@ class AemetClient:
                         vistos.add(clave)
 
                         alertas_img.append({
-                            "zona":        info.findtext(_cap("areaDesc"), default=zona),
+                            "zona":        NOMBRE_ZONA if NOMBRE_ZONA else info.findtext(_cap("areaDesc"), default=zona),
                             "nivelAviso":  nivel,
                             "parametro":   parametro,
                             "descripcion": info.findtext(_cap("description"), default=""),
