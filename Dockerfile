@@ -12,6 +12,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY aemet.py categorias.py bot.py enviar_resumen.py generar_tabla_imagen.py logo.png ./
+COPY aemet.py categorias.py bot.py enviar_resumen.py generar_preddiccion_imagen.py generar_tabla_imagen.py logo.png ./
 
 CMD ["python", "bot.py"]
