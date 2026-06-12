@@ -14,26 +14,16 @@ Bot automatizado e interactivo para la monitorización, consulta y envío en tie
 El sistema delega la ejecución del resumen diario en el planificador del host físico (LXC) para garantizar la resiliencia del servicio sin comprometer la seguridad ni los privilegios del contenedor.
 
 graph LR
-    %% Definición de Estilos
-    classDef lxc fill:#f9f9f9,stroke:#e0e0e0,stroke-width:2px;
-    classDef docker fill:#e1f5fe,stroke:#0288d1,stroke-width:1px;
-    classDef cron fill:#fff3e0,stroke:#f57c00,stroke-width:1px;
-
-    subgraph LXC [Host: LXC No Privilegiado (Proxmox VE)]
-        A[⏱️ Cron del LXC]
-        B[🐳 Docker Engine]
-        C[📦 Contenedor: aemet-bot]
+    subgraph LXC [Host: LXC No Privilegiado en Proxmox VE]
+        A[⏱️ Cron del LXC] -->|07:00h ➔ docker exec| B[📦 Contenedor: aemet-bot]
+        C[🐳 Docker Engine] --- B
     end
 
-    %% Flujos y Relaciones
-    A -->|07:00h | D(docker exec)
-    D --> C
-    B --- C
-
-    %% Aplicación de Estilos
-    class LXC lxc;
-    class C docker;
-    class A cron;
+    %% Estilos de los nodos
+    style LXC fill:#fcfcfc,stroke:#dcdcdc,stroke-width:2px
+    style A fill:#fff4e6,stroke:#f57c00,stroke-width:1px
+    style B fill:#e1f5fe,stroke:#0288d1,stroke-width:1px
+    style C fill:#eceff1,stroke:#607d8b,stroke-width:1px
       
 > 💡 **Nota de Diseño:** El resumen matutino lo dispara el **cron nativo del LXC**, no un proceso continuo en segundo plano dentro de Docker. Esto mantiene el contenedor *single-process*, optimiza recursos y evita lidiar con problemas de *capabilities* o permisos en entornos virtuales LXC no privilegiados en Proxmox.
 
