@@ -13,12 +13,17 @@ Bot automatizado e interactivo para la monitorización, consulta y envío en tie
 
 El sistema delega la ejecución del resumen diario en el planificador del host físico (LXC) para garantizar la resiliencia del servicio sin comprometer la seguridad ni los privilegios del contenedor.
 
-LXC No Privilegiado (Proxmox VE)
- ├── 🐳 Docker Engine
- │    └── 📦 aemet-bot (Bot interactivo - Activo 24/7)
- │
- └── ⏱️ Cron del Host LXC
-      └── 07:00h ➔ docker exec aemet-bot python enviar_resumen.py
+graph TD
+    subgraph Host [Host: LXC No Privilegiado en Proxmox]
+        Cron[⏱️ Cron del LXC]
+        Docker[🐳 Docker Engine]
+        
+        subgraph Contenedor [Contenedor Docker]
+            Bot[📦 aemet-bot <br><i>Siempre activo (Interactive)</i>]
+        end
+    end
+
+    Cron -->|07:00h <br> docker exec| Bot
       
 > 💡 **Nota de Diseño:** El resumen matutino lo dispara el **cron nativo del LXC**, no un proceso continuo en segundo plano dentro de Docker. Esto mantiene el contenedor *single-process*, optimiza recursos y evita lidiar con problemas de *capabilities* o permisos en entornos virtuales LXC no privilegiados en Proxmox.
 
